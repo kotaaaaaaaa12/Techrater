@@ -143,9 +143,36 @@ async function authenticatedWebSocket(
   const accessToken = url.searchParams.get("access_token");
   if (!accessToken) return new Response("Missing access token", { status: 401 });
 
-  // Keep the original Upgrade request intact. Reconstructing it can discard
-  // WebSocket-specific request state before the Container proxy sees it.
-  return container.fetch(request);
+  try {
+    // Keep the original Upgrade request intact. Reconstructing it can discard
+    // WebSocket-specific request state before the Container proxy sees it.
+    const response = await container.fetch(request);
+    if (response.status === 101 && response.webSocket !== null) return response;
+
+    const body = (await response.text()).trim();
+    const detail = body ? `: ${body}` : "";
+    const reason = `Upstream WebSocket rejected (${response.status})${detail}`;
+    console.error(reason);
+    return closedWebSocket(reason);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const reason = `WebSocket proxy failed: ${detail}`;
+    console.error(reason);
+    return closedWebSocket(reason);
+  }
+}
+
+function closedWebSocket(message: string): Response {
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
+
+  let reason = message || "Unknown WebSocket proxy error";
+  const encoder = new TextEncoder();
+  while (encoder.encode(reason).byteLength > 120) reason = reason.slice(0, -1);
+  server.close(4500, reason);
+
+  return new Response(null, { status: 101, webSocket: client });
 }
 
 async function healthCheck(request: Request, container: DurableObjectStub<TechraterContainer>): Promise<Response> {
