@@ -23,6 +23,9 @@ void CheckAccessToken::doFilter(
 ) {
     auto accessToken = req->getHeader("x-access-token");
     if (accessToken.empty()) {
+        accessToken = req->getParameter("access_token");
+    }
+    if (accessToken.empty()) {
         ResponseJson(k400BadRequest, ResultCode::InvalidArguments)
                 .setMessage(i18n("invalidArguments"))
                 .to(failedCb);
@@ -46,5 +49,4 @@ void CheckAccessToken::doFilter(
     }
     nextCb();
 }
-
 

@@ -142,10 +142,10 @@ async function authenticatedWebSocket(
   const url = new URL(request.url);
   const accessToken = url.searchParams.get("access_token");
   if (!accessToken) return new Response("Missing access token", { status: 401 });
-  url.searchParams.delete("access_token");
-  const headers = new Headers(request.headers);
-  headers.set("x-access-token", accessToken);
-  return container.fetch(new Request(url, { method: "GET", headers }));
+
+  // Keep the original Upgrade request intact. Reconstructing it can discard
+  // WebSocket-specific request state before the Container proxy sees it.
+  return container.fetch(request);
 }
 
 async function healthCheck(request: Request, container: DurableObjectStub<TechraterContainer>): Promise<Response> {
