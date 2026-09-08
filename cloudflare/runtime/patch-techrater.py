@@ -2,6 +2,8 @@ from pathlib import Path
 
 model_path = Path("models/Data.cc")
 source = model_path.read_text(encoding="utf-8")
+header_path = Path("models/Data.h")
+header = header_path.read_text(encoding="utf-8")
 
 columns_before = """const std::vector<std::string> &Data::insertColumns() noexcept
 {
@@ -24,9 +26,17 @@ arguments_after = """void Data::outputArgs(drogon::orm::internal::SqlBinder &bin
     }
     if(dirtyFlag_[1])"""
 
-if columns_before not in source or arguments_before not in source:
+insert_value_before = """        sql +="default,";
+        if(dirtyFlag_[1])"""
+insert_value_after = """        n = sprintf(placeholderStr,"$%d,",placeholder++);
+        sql.append(placeholderStr, n);
+        if(dirtyFlag_[1])"""
+
+if columns_before not in source or arguments_before not in source or insert_value_before not in header:
     raise SystemExit("The expected generated Data model blocks were not found")
 
 source = source.replace(columns_before, columns_after, 1)
 source = source.replace(arguments_before, arguments_after, 1)
 model_path.write_text(source, encoding="utf-8")
+header = header.replace(insert_value_before, insert_value_after, 1)
+header_path.write_text(header, encoding="utf-8")
