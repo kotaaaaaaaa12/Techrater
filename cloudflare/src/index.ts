@@ -31,6 +31,19 @@ export class TechraterContainer extends Container {
     SUPABASE_DB_PASSWORD: env.SUPABASE_DB_PASSWORD,
     TECHRATER_AUTH_TOKEN: env.TECHRATER_AUTH_TOKEN,
   };
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/techmino/ws/v1") {
+      const accessToken = url.searchParams.get("access_token");
+      const headers = new Headers(request.headers);
+      headers.set("Connection", "Upgrade");
+      headers.set("Upgrade", "websocket");
+      if (accessToken) headers.set("x-access-token", accessToken);
+      return super.fetch(new Request(request, { headers }));
+    }
+    return super.fetch(request);
+  }
 }
 
 interface SupabaseSession {
