@@ -4,7 +4,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        build-essential ca-certificates curl git pkg-config python3 python3-pip zip unzip tar \
        autoconf automake autoconf-archive libtool linux-libc-dev \
-    && pip3 install --break-system-packages cmake ninja \
+    && pip3 install --break-system-packages cmake==3.31.10 ninja \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src/techrater

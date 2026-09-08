@@ -42,7 +42,7 @@ npx wrangler secret put TECHRATER_AUTH_TOKEN
 | Setting | Value |
 | --- | --- |
 | Root directory | Repository root |
-| Build command | `npm ci && npm run typecheck` |
+| Build command | `npm run typecheck` |
 | Deploy command | `npx wrangler deploy` |
 
 The first image build is slow because vcpkg compiles the native Techrater dependencies. The configuration uses one `basic` Container instance because rooms and Redis tokens are stored in memory.
