@@ -235,32 +235,41 @@ void Room::appendChat(Json::Value &&chat) {
 }
 
 void Room::matchTryStart(bool force) {
-    if (!(state == State::Standby && (force || isAllReady()))) {
+    if (!(force || isAllReady())) {
+        LOG_INFO << "TECHRATER_MATCH_WAITING roomId=" << roomId
+                 << " state=" << enum_name(state.load());
         return;
     }
 
-    state = State::Ready;
+    auto expected = State::Standby;
+    if (!state.compare_exchange_strong(expected, State::Playing)) {
+        LOG_INFO << "TECHRATER_MATCH_START_SKIPPED roomId=" << roomId
+                 << " state=" << enum_name(expected);
+        return;
+    }
+
+    LOG_INFO << "TECHRATER_MATCH_STARTING roomId=" << roomId
+             << " seed=" << seed.load();
     publish(MessageJson(enum_integer(Action::MatchReady)));
 
-    _startTimerId = app().getLoop()->runAfter(3, [this]() {
-        state = State::Playing;
-        {
-            shared_lock<shared_mutex> lock(_playerMutex);
-            for (const auto &[playerId, wsConnRef]: _playerMap) {
-                if (auto wsConnPtr = wsConnRef.lock()) {
-                    const auto &player = wsConnPtr->getContext<Player>();
-                    if (player->type == Player::Type::Gamer) {
-                        player->state = Player::State::Playing;
-                    }
-                } else {
-                    _needClean = true;
+    {
+        shared_lock<shared_mutex> lock(_playerMutex);
+        for (const auto &[playerId, wsConnRef]: _playerMap) {
+            if (auto wsConnPtr = wsConnRef.lock()) {
+                const auto &player = wsConnPtr->getContext<Player>();
+                if (player->type == Player::Type::Gamer) {
+                    player->state = Player::State::Playing;
                 }
+            } else {
+                _needClean = true;
             }
         }
-        Json::Value data;
-        data["seed"] = seed.load();
-        publish(MessageJson(enum_integer(Action::MatchStart)).setData(data));
-    });
+    }
+
+    Json::Value data;
+    data["seed"] = seed.load();
+    publish(MessageJson(enum_integer(Action::MatchStart)).setData(data));
+    LOG_INFO << "TECHRATER_MATCH_STARTED roomId=" << roomId;
 }
 
 bool Room::cancelStart() {
@@ -351,24 +360,29 @@ uint64_t Room::countSpectator() {
 }
 
 bool Room::isAllReady() {
-    bool hasGamer = false;
+    uint64_t gamerCount = 0;
+    uint64_t readyCount = 0;
     shared_lock<shared_mutex> lock(_playerMutex);
-    return all_of(_playerMap.begin(), _playerMap.end(), [&](const auto &item) {
+    for (const auto &item: _playerMap) {
         const auto &[playerId, wsConnRef] = item;
         if (const auto &wsConnPtr = wsConnRef.lock()) {
             const auto &player = wsConnPtr->template getContext<Player>();
             if (player->type == Player::Type::Gamer) {
-                if (player->state != Player::State::Ready) {
-                    return false;
-                } else if (!hasGamer) {
-                    hasGamer = true;
+                ++gamerCount;
+                if (player->state == Player::State::Ready) {
+                    ++readyCount;
                 }
             }
         } else {
             _needClean = true;
         }
-        return true;
-    }) && hasGamer;
+    }
+
+    LOG_INFO << "TECHRATER_READY_CHECK roomId=" << roomId
+             << " gamers=" << gamerCount
+             << " ready=" << readyCount
+             << " capacity=" << capacity.load();
+    return gamerCount > 0 && gamerCount == readyCount;
 }
 
 void Room::clean() {

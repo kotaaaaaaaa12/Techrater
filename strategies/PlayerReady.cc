@@ -45,6 +45,9 @@ void PlayerReady::process(const WebSocketConnectionPtr &wsConnPtr, RequestJson &
 
         player->state = isReady ? Player::State::Ready : Player::State::Standby;
         auto room = player->getRoom();
+        LOG_INFO << "TECHRATER_PLAYER_READY roomId=" << room->roomId
+                 << " playerId=" << player->playerId
+                 << " ready=" << isReady;
         room->publish(MessageJson(_action).setData(std::move(data)));
         if (isReady) {
             room->matchTryStart();
