@@ -42,6 +42,8 @@ void PlayerFinish::process(const WebSocketConnectionPtr &wsConnPtr, RequestJson 
 
         player->state = Player::State::Finished;
         auto room = player->getRoom();
+        LOG_INFO << "TECHRATER_PLAYER_FINISH roomId=" << room->roomId
+                 << " playerId=" << player->playerId;
         room->publish(MessageJson(_action).setData(std::move(data)));
         room->matchTryEnd();
     }, _action, wsConnPtr);
