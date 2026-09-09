@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Container, getContainer } from "@cloudflare/containers";
+import { Container, getContainer, switchPort } from "@cloudflare/containers";
 
 interface WorkerEnv {
   TECHRATER: DurableObjectNamespace<TechraterContainer>;
@@ -146,7 +146,7 @@ async function authenticatedWebSocket(
   try {
     // Keep the original Upgrade request intact. Reconstructing it can discard
     // WebSocket-specific request state before the Container proxy sees it.
-    const response = await container.fetch(request);
+    const response = await container.fetch(switchPort(request, 8080));
     if (response.status === 101 && response.webSocket !== null) return response;
 
     const body = (await response.text()).trim();
