@@ -63,7 +63,16 @@ void RoomCreate::process(const WebSocketConnectionPtr &wsConnPtr, RequestJson &r
         player->setRoom(room);
         player->role = Player::Role::Admin;
         player->type = Player::Type::Gamer;
-        MessageJson(_action).setData(room->parse(true)).to(wsConnPtr);
+        LOG_INFO << "TECHRATER_ROOM_CREATED roomId=" << room->roomId
+                 << " playerId=" << player->playerId;
+
+        // Return the full room snapshot through the same response action used
+        // by Room Join. The browser client already handles that path reliably
+        // for joining players, so the creator follows the identical lobby
+        // initialization flow.
+        MessageJson(enum_integer(Action::RoomJoin))
+                .setData(room->parse(true))
+                .to(wsConnPtr);
 
         app().getPlugin<RoomManager>()->setRoom(std::move(room));
     }, _action, wsConnPtr);
