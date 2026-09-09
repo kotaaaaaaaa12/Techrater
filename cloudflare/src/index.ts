@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Container, getContainer, switchPort } from "@cloudflare/containers";
+import { Container, getContainer } from "@cloudflare/containers";
 
 interface WorkerEnv {
   TECHRATER: DurableObjectNamespace<TechraterContainer>;
@@ -135,11 +135,6 @@ async function createBrowserSession(
   }
 }
 
-function createWebSocketKey(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return btoa(String.fromCharCode(...bytes));
-}
-
 async function authenticatedWebSocket(
   request: Request,
   container: DurableObjectStub<TechraterContainer>,
@@ -148,52 +143,7 @@ async function authenticatedWebSocket(
   const accessToken = url.searchParams.get("access_token");
   if (!accessToken) return new Response("Missing access token", { status: 401 });
 
-  try {
-    const headers = new Headers(request.headers);
-    const incomingKey = headers.get("Sec-WebSocket-Key");
-    headers.set("Upgrade", "websocket");
-    headers.set("Connection", "Upgrade");
-    headers.set("Sec-WebSocket-Version", headers.get("Sec-WebSocket-Version") || "13");
-    if (!incomingKey) headers.set("Sec-WebSocket-Key", createWebSocketKey());
-
-    console.log("WEBSOCKET_EDGE_DIAGNOSTIC", JSON.stringify({
-      path: url.pathname,
-      key: incomingKey ? "present" : "generated",
-      version: headers.get("Sec-WebSocket-Version"),
-      upgrade: headers.get("Upgrade"),
-      connection: headers.get("Connection"),
-    }));
-
-    // switchPort preserves the WebSocket request while selecting the
-    // container's listening port.
-    const upstreamRequest = new Request(request, { headers });
-    const response = await container.fetch(switchPort(upstreamRequest, 8080));
-    if (response.status === 101 && response.webSocket !== null) return response;
-
-    const body = (await response.text()).trim();
-    const detail = body ? `: ${body}` : "";
-    const reason = `Upstream WebSocket rejected (${response.status})${detail}`;
-    console.error(reason);
-    return closedWebSocket(reason);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    const reason = `WebSocket proxy failed: ${detail}`;
-    console.error(reason);
-    return closedWebSocket(reason);
-  }
-}
-
-function closedWebSocket(message: string): Response {
-  const pair = new WebSocketPair();
-  const [client, server] = Object.values(pair);
-  server.accept();
-
-  let reason = message || "Unknown WebSocket proxy error";
-  const encoder = new TextEncoder();
-  while (encoder.encode(reason).byteLength > 120) reason = reason.slice(0, -1);
-  server.close(4500, reason);
-
-  return new Response(null, { status: 101, webSocket: client });
+  return container.fetch(request);
 }
 
 async function healthCheck(request: Request, container: DurableObjectStub<TechraterContainer>): Promise<Response> {
@@ -238,4 +188,3 @@ export default {
     return addCors(new Response("Not found", { status: 404 }), origin);
   },
 } satisfies ExportedHandler<WorkerEnv>;
-
