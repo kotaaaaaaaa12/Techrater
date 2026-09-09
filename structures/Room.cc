@@ -250,7 +250,9 @@ void Room::matchTryStart(bool force) {
 
     LOG_INFO << "TECHRATER_MATCH_STARTING roomId=" << roomId
              << " seed=" << seed.load();
-    publish(MessageJson(enum_integer(Action::MatchReady)));
+    Json::Value data;
+    data["seed"] = seed.load();
+    publish(MessageJson(enum_integer(Action::MatchReady)).setData(data));
 
     {
         shared_lock<shared_mutex> lock(_playerMutex);
@@ -266,8 +268,6 @@ void Room::matchTryStart(bool force) {
         }
     }
 
-    Json::Value data;
-    data["seed"] = seed.load();
     publish(MessageJson(enum_integer(Action::MatchStart)).setData(data));
     LOG_INFO << "TECHRATER_MATCH_STARTED roomId=" << roomId;
 }
