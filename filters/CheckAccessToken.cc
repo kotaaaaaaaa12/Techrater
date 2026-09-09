@@ -21,11 +21,13 @@ void CheckAccessToken::doFilter(
         FilterCallback &&failedCb,
         FilterChainCallback &&nextCb
 ) {
+    LOG_INFO << "TECHRATER_WS_FILTER_BEGIN path=" << req->path();
     auto accessToken = req->getHeader("x-access-token");
     if (accessToken.empty()) {
         accessToken = req->getParameter("access_token");
     }
     if (accessToken.empty()) {
+        LOG_WARN << "TECHRATER_WS_FILTER_REJECT reason=missing_token";
         ResponseJson(k400BadRequest, ResultCode::InvalidArguments)
                 .setMessage(i18n("invalidArguments"))
                 .to(failedCb);
@@ -34,19 +36,18 @@ void CheckAccessToken::doFilter(
     try {
         const auto playerManager = app().getPlugin<PlayerManager>();
         if (playerManager->tryRefresh(accessToken)) {
-            req->attributes()->insert(
-                    "accessToken",
-                    accessToken
-            );
+            req->attributes()->insert("accessToken", accessToken);
         }
-        req->attributes()->insert(
-                "playerId",
-                playerManager->getPlayerIdByAccessToken(accessToken)
-        );
+        const auto playerId = playerManager->getPlayerIdByAccessToken(accessToken);
+        req->attributes()->insert("playerId", playerId);
+        LOG_INFO << "TECHRATER_WS_FILTER_ACCEPT playerId=" << playerId;
     } catch (const ResponseException &e) {
+        LOG_WARN << "TECHRATER_WS_FILTER_REJECT reason=invalid_token";
         e.toJson().to(failedCb);
         return;
+    } catch (const exception &e) {
+        LOG_ERROR << "TECHRATER_WS_FILTER_ERROR reason=" << e.what();
+        throw;
     }
     nextCb();
 }
-

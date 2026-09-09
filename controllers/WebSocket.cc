@@ -24,17 +24,20 @@ void WebSocket::handleNewConnection(
 ) {
     try {
         const auto playerId = req->getAttributes()->get<int64_t>("playerId");
+        LOG_INFO << "TECHRATER_WS_CONNECTED playerId=" << playerId
+                 << " peer=" << wsConnPtr->peerAddr().toIpPort();
         wsConnPtr->setContext(make_shared<Player>(playerId));
         wsConnPtr->setPingMessage("", chrono::seconds(5));
         _connectionManager->subscribe(wsConnPtr);
+        LOG_INFO << "TECHRATER_WS_SUBSCRIBED playerId=" << playerId;
     } catch (const orm::DrogonDbException &e) {
-        LOG_ERROR << e.base().what();
+        LOG_ERROR << "TECHRATER_WS_CONNECT_DB_ERROR reason=" << e.base().what();
         MessageJson(ErrorNumber::Error)
                 .setMessage(i18n("playerNotFound"))
                 .setReason(e.base().what())
                 .to(wsConnPtr);
     } catch (const exception &e) {
-        LOG_ERROR << e.what();
+        LOG_ERROR << "TECHRATER_WS_CONNECT_ERROR reason=" << e.what();
         MessageJson(ErrorNumber::Error)
                 .setMessage(i18n("connectionFailed"))
                 .setReason(e.what())
@@ -43,6 +46,8 @@ void WebSocket::handleNewConnection(
 }
 
 void WebSocket::handleConnectionClosed(const WebSocketConnectionPtr &wsConnPtr) {
+    LOG_INFO << "TECHRATER_WS_CLOSED peer=" << wsConnPtr->peerAddr().toIpPort()
+             << " hasContext=" << wsConnPtr->hasContext();
     if (wsConnPtr->hasContext()) {
         const auto player = wsConnPtr->getContext<Player>();
         if (auto room = player->getRoom()) {
@@ -55,7 +60,6 @@ void WebSocket::handleConnectionClosed(const WebSocketConnectionPtr &wsConnPtr) 
         }
         _connectionManager->unsubscribe(wsConnPtr);
     }
-    wsConnPtr->forceClose();
 }
 
 bool WebSocket::connectionFilter(const WebSocketConnectionPtr &wsConnPtr) {

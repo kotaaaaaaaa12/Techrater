@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { Container, getContainer } from "@cloudflare/containers";
+import { Container, getContainer, type StopParams } from "@cloudflare/containers";
 
 interface WorkerEnv {
   TECHRATER: DurableObjectNamespace<TechraterContainer>;
@@ -20,6 +20,10 @@ declare global {
   }
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
 export class TechraterContainer extends Container {
   defaultPort = 8080;
   sleepAfter = "30m";
@@ -31,6 +35,23 @@ export class TechraterContainer extends Container {
     SUPABASE_DB_PASSWORD: env.SUPABASE_DB_PASSWORD,
     TECHRATER_AUTH_TOKEN: env.TECHRATER_AUTH_TOKEN,
   };
+
+  override onStart(): void {
+    console.info({ event: "techrater.container.started", port: this.defaultPort });
+  }
+
+  override onStop(params: StopParams): void {
+    console.error({
+      event: "techrater.container.stopped",
+      exitCode: params.exitCode,
+      reason: params.reason,
+    });
+  }
+
+  override onError(error: unknown): never {
+    console.error({ event: "techrater.container.error", error: errorMessage(error) });
+    throw error;
+  }
 }
 
 interface SupabaseSession {
@@ -82,6 +103,7 @@ async function getSupabaseSession(request: Request, workerEnv: WorkerEnv): Promi
     // An empty request creates a new anonymous account.
   }
 
+  console.info({ event: "techrater.auth.supabase.begin", refresh: Boolean(refreshToken) });
   const endpoint = refreshToken
     ? `${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`
     : `${workerEnv.SUPABASE_URL}/auth/v1/signup`;
@@ -94,6 +116,7 @@ async function getSupabaseSession(request: Request, workerEnv: WorkerEnv): Promi
     },
     body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
   });
+  console.info({ event: "techrater.auth.supabase.response", status: response.status });
   if (!response.ok) throw new Error(`Supabase authentication failed (${response.status})`);
   return response.json<SupabaseSession>();
 }
@@ -110,6 +133,7 @@ async function createBrowserSession(
     }
 
     const playerId = await stablePlayerId(session.user.id);
+    console.info({ event: "techrater.auth.exchange.begin", playerId });
     const oauthUrl = new URL(request.url);
     oauthUrl.pathname = `/techmino/api/v1/auth/oauth/${encodeURIComponent(workerEnv.TECHRATER_AUTH_TOKEN)}`;
     oauthUrl.search = "";
@@ -118,20 +142,24 @@ async function createBrowserSession(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ playerId }),
     }));
+    console.info({ event: "techrater.auth.exchange.response", playerId, status: oauthResponse.status });
     const oauthBody = await oauthResponse.json<{ data?: string; message?: string }>();
     if (!oauthResponse.ok || typeof oauthBody.data !== "string") {
       throw new Error(oauthBody.message || `Techrater token exchange failed (${oauthResponse.status})`);
     }
 
+    console.info({ event: "techrater.auth.complete", playerId });
     return Response.json({
       accessToken: oauthBody.data,
       refreshToken: session.refresh_token,
       playerId,
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    return Response.json({
-      error: error instanceof Error ? error.message : "Authentication failed",
-    }, { status: 502, headers: { "Cache-Control": "no-store" } });
+    console.error({ event: "techrater.auth.error", error: errorMessage(error) });
+    return Response.json({ error: errorMessage(error) }, {
+      status: 502,
+      headers: { "Cache-Control": "no-store" },
+    });
   }
 }
 
@@ -141,9 +169,29 @@ async function authenticatedWebSocket(
 ): Promise<Response> {
   const url = new URL(request.url);
   const accessToken = url.searchParams.get("access_token");
-  if (!accessToken) return new Response("Missing access token", { status: 401 });
+  if (!accessToken) {
+    console.warn({ event: "techrater.websocket.rejected", reason: "missing_access_token" });
+    return new Response("Missing access token", { status: 401 });
+  }
 
-  return container.fetch(request);
+  const attemptId = crypto.randomUUID();
+  console.info({ event: "techrater.websocket.forward.begin", attemptId });
+  try {
+    const response = await container.fetch(request);
+    console.info({
+      event: "techrater.websocket.forward.response",
+      attemptId,
+      status: response.status,
+    });
+    return response;
+  } catch (error) {
+    console.error({
+      event: "techrater.websocket.forward.error",
+      attemptId,
+      error: errorMessage(error),
+    });
+    throw error;
+  }
 }
 
 async function healthCheck(request: Request, container: DurableObjectStub<TechraterContainer>): Promise<Response> {
@@ -152,11 +200,13 @@ async function healthCheck(request: Request, container: DurableObjectStub<Techra
   url.search = "?language=en_us&lastCount=1";
   try {
     const response = await container.fetch(new Request(url, { method: "GET" }));
+    console.info({ event: "techrater.health.response", status: response.status });
     return new Response(response.ok ? "ok\n" : "unhealthy\n", {
       status: response.ok ? 200 : 503,
       headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" },
     });
-  } catch {
+  } catch (error) {
+    console.error({ event: "techrater.health.error", error: errorMessage(error) });
     return new Response("unhealthy\n", {
       status: 503,
       headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" },
@@ -167,6 +217,14 @@ async function healthCheck(request: Request, container: DurableObjectStub<Techra
 export default {
   async fetch(request, workerEnv): Promise<Response> {
     const url = new URL(request.url);
+    const upgrade = request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+    console.info({
+      event: "techrater.request",
+      method: request.method,
+      path: url.pathname,
+      upgrade,
+      hasOrigin: request.headers.has("Origin"),
+    });
     const container = getContainer(workerEnv.TECHRATER);
 
     if (url.pathname === "/_worker/health" && request.method === "GET") {
@@ -174,7 +232,10 @@ export default {
     }
 
     const origin = allowedOrigin(request, workerEnv);
-    if (!origin) return new Response("Forbidden origin", { status: 403 });
+    if (!origin) {
+      console.warn({ event: "techrater.request.rejected", path: url.pathname, reason: "forbidden_origin" });
+      return new Response("Forbidden origin", { status: 403 });
+    }
 
     if (url.pathname === "/_worker/auth/session" && request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
@@ -182,7 +243,7 @@ export default {
     if (url.pathname === "/_worker/auth/session" && request.method === "POST") {
       return addCors(await createBrowserSession(request, workerEnv, container), origin);
     }
-    if (url.pathname === "/techmino/ws/v1" && request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+    if (url.pathname === "/techmino/ws/v1" && upgrade) {
       return authenticatedWebSocket(request, container);
     }
     return addCors(new Response("Not found", { status: 404 }), origin);
