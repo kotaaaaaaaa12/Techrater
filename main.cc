@@ -9,8 +9,24 @@ int main() {
     drogon::app().registerController(
             std::make_shared<techmino::ws::v1::WebSocket>()
     );
-    LOG_INFO << "Techrater WebSocket controller registered";
+
+    drogon::app().registerBeginningAdvice([]() {
+        LOG_INFO << "Techrater WebSocket controller registered";
+    });
+    drogon::app().registerPreRoutingAdvice([](const drogon::HttpRequestPtr &req) {
+        if (req->path() != "/techmino/ws/v1") {
+            return;
+        }
+
+        LOG_INFO << "WEBSOCKET_CONTAINER_DIAGNOSTIC"
+                 << " key="
+                 << (req->getHeader("sec-websocket-key").empty() ? "missing" : "present")
+                 << " version=" << req->getHeader("sec-websocket-version")
+                 << " upgrade=" << req->getHeader("upgrade")
+                 << " connection=" << req->getHeader("connection");
+    });
 
     drogon::app().run();
     return 0;
 }
+
