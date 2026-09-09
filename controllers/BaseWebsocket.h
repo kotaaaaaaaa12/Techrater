@@ -15,7 +15,7 @@
 namespace techmino::ws::v1 {
     template<class controllerImpl, class handlerManagerImpl>
     class BaseWebsocket :
-            public drogon::WebSocketController<controllerImpl, false>,
+            public drogon::WebSocketController<controllerImpl>,
             public helpers::I18nHelper<controllerImpl> {
     public:
         BaseWebsocket() : _handlerManager(drogon::app().getPlugin<handlerManagerImpl>()) {};
