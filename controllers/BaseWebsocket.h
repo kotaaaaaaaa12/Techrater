@@ -15,10 +15,10 @@
 namespace techmino::ws::v1 {
     template<class controllerImpl, class handlerManagerImpl>
     class BaseWebsocket :
-            public drogon::WebSocketController<controllerImpl>,
+            public drogon::WebSocketController<controllerImpl, false>,
             public helpers::I18nHelper<controllerImpl> {
     public:
-        BaseWebsocket() : _handlerManager(drogon::app().getPlugin<handlerManagerImpl>()) {};
+        BaseWebsocket() = default;
 
         ~BaseWebsocket() override = default;
 
@@ -84,14 +84,12 @@ namespace techmino::ws::v1 {
                         .to(wsConnPtr);
             }
             RequestJson requestJson(request["data"]);
-            return _handlerManager->process(
+            auto handlerManager = drogon::app().getPlugin<handlerManagerImpl>();
+            return handlerManager->process(
                     request["action"].asInt(),
                     wsConnPtr,
                     requestJson
             );
         }
-
-    private:
-        structures::HandlerManagerBase<handlerManagerImpl> *_handlerManager;
     };
 }

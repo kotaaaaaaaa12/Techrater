@@ -16,7 +16,7 @@ using namespace techmino::structures;
 using namespace techmino::types;
 using namespace techmino::ws::v1;
 
-WebSocket::WebSocket() : _connectionManager(app().getPlugin<ConnectionManager>()) {}
+WebSocket::WebSocket() : _connectionManager(nullptr) {}
 
 void WebSocket::handleNewConnection(
         const HttpRequestPtr &req,
@@ -28,6 +28,9 @@ void WebSocket::handleNewConnection(
                  << " peer=" << wsConnPtr->peerAddr().toIpPort();
         wsConnPtr->setContext(make_shared<Player>(playerId));
         wsConnPtr->setPingMessage("", chrono::seconds(5));
+        if (!_connectionManager) {
+            _connectionManager = app().getPlugin<ConnectionManager>();
+        }
         _connectionManager->subscribe(wsConnPtr);
         LOG_INFO << "TECHRATER_WS_SUBSCRIBED playerId=" << playerId;
     } catch (const orm::DrogonDbException &e) {
@@ -57,6 +60,9 @@ void WebSocket::handleConnectionClosed(const WebSocketConnectionPtr &wsConnPtr) 
                     player->playerId,
                     MessageJson(enum_integer(Action::RoomLeave)).setData(data)
             );
+        }
+        if (!_connectionManager) {
+            _connectionManager = app().getPlugin<ConnectionManager>();
         }
         _connectionManager->unsubscribe(wsConnPtr);
     }
