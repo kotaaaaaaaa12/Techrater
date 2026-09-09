@@ -16,6 +16,7 @@ RUN grep -q "6154c816446e115f3b164df79ab8d8088eb76b632ee3fdc82ea17cc7ae8d04652c8
     && sed -i \
        "s/6154c816446e115f3b164df79ab8d8088eb76b632ee3fdc82ea17cc7ae8d04652c83e5cc587c2c4b334889904b101ba08a04c5837103af260768e93df17cc263/fa3792e9c69c57e437d6325b7659cf25e6cbdda3326ffeaf0411d9838822095b15306f322ad2ebd5ec68b905ef2aed08880d2507e7d8a8559ab3c5be6c8ce99c/" \
        vcpkg/ports/magic-enum/portfile.cmake
+RUN python3 cloudflare/runtime/patch-vcpkg-drogon.py
 RUN python3 cloudflare/runtime/patch-techrater.py
 RUN ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \

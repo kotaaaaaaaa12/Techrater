@@ -1,0 +1,19 @@
+diff --git a/lib/src/HttpServer.cc b/lib/src/HttpServer.cc
+index 1ec3c08..a70d252 100644
+--- a/lib/src/HttpServer.cc
++++ b/lib/src/HttpServer.cc
+@@ -269,9 +269,11 @@ void HttpServer::onRequests(
+ {
+     assert(!requests.empty());
+ 
+-    // will only be checked for the first request
+-    if (requestParser->firstReq() && requests.size() == 1 &&
+-        isWebSocket(requests[0]))
++    // A reverse proxy can reuse an upstream keep-alive connection. Check every
++    // non-pipelined request so a later WebSocket upgrade does not fall through
++    // to the ordinary HTTP router and return 404.
++    if (requests.size() == 1 && requestParser->emptyPipelining() &&
++        isWebSocket(requests[0]))
+     {
+         auto &req = requests[0];
+         req->startProcessing();
