@@ -135,6 +135,11 @@ async function createBrowserSession(
   }
 }
 
+function createWebSocketKey(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return btoa(String.fromCharCode(...bytes));
+}
+
 async function authenticatedWebSocket(
   request: Request,
   container: DurableObjectStub<TechraterContainer>,
@@ -144,9 +149,25 @@ async function authenticatedWebSocket(
   if (!accessToken) return new Response("Missing access token", { status: 401 });
 
   try {
-    // Keep the original Upgrade request intact. Reconstructing it can discard
-    // WebSocket-specific request state before the Container proxy sees it.
-    const response = await container.fetch(switchPort(request, 8080));
+    const headers = new Headers(request.headers);
+    const incomingKey = headers.get("Sec-WebSocket-Key");
+    headers.set("Upgrade", "websocket");
+    headers.set("Connection", "Upgrade");
+    headers.set("Sec-WebSocket-Version", headers.get("Sec-WebSocket-Version") || "13");
+    if (!incomingKey) headers.set("Sec-WebSocket-Key", createWebSocketKey());
+
+    console.log("WEBSOCKET_EDGE_DIAGNOSTIC", JSON.stringify({
+      path: url.pathname,
+      key: incomingKey ? "present" : "generated",
+      version: headers.get("Sec-WebSocket-Version"),
+      upgrade: headers.get("Upgrade"),
+      connection: headers.get("Connection"),
+    }));
+
+    // switchPort preserves the WebSocket request while selecting the
+    // container's listening port.
+    const upstreamRequest = new Request(request, { headers });
+    const response = await container.fetch(switchPort(upstreamRequest, 8080));
     if (response.status === 101 && response.webSocket !== null) return response;
 
     const body = (await response.text()).trim();
@@ -217,3 +238,4 @@ export default {
     return addCors(new Response("Not found", { status: 404 }), origin);
   },
 } satisfies ExportedHandler<WorkerEnv>;
+
