@@ -8,10 +8,11 @@ int main() {
     drogon::app().registerBeginningAdvice([]() {
         bool routeFound = false;
         for (const auto &handler : drogon::app().getHandlersInfo()) {
+            LOG_INFO << "TECHRATER_ROUTE path=" << std::get<0>(handler)
+                     << " handler=" << std::get<2>(handler);
             if (std::get<0>(handler) == "/techmino/ws/v1" &&
                 std::get<2>(handler).find("WebsocketController") != std::string::npos) {
                 routeFound = true;
-                break;
             }
         }
 
@@ -20,6 +21,7 @@ int main() {
         } else {
             LOG_ERROR << "TECHRATER_WS_ROUTE_MISSING path=/techmino/ws/v1";
         }
+        LOG_INFO << "TECHRATER_SERVER_READY port=8080";
     });
 
     drogon::app().run();
