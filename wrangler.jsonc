@@ -9,7 +9,10 @@
       "class_name": "TechraterContainer",
       "image": "./Dockerfile",
       "max_instances": 1,
-      "instance_type": "basic"
+      "instance_type": "basic",
+      "constraints": {
+        "regions": ["APAC"]
+      }
     }
   ],
   "durable_objects": {
