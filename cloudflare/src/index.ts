@@ -66,7 +66,7 @@ interface SupabaseSession {
 }
 
 interface BrowserAuthRequest {
-  mode?: "guest" | "email-sign-in" | "email-sign-up";
+  mode?: "email-sign-in" | "email-sign-up";
   refreshToken?: unknown;
   email?: unknown;
   password?: unknown;
@@ -210,8 +210,8 @@ async function getSupabaseSession(
   }
 
   const refreshToken = typeof auth.refreshToken === "string" ? auth.refreshToken : "";
-  const mode = auth.mode || (refreshToken ? "guest" : "guest");
-  let endpoint = `${workerEnv.SUPABASE_URL}/auth/v1/signup`;
+  const mode = auth.mode || (refreshToken ? "refresh" : "missing");
+  let endpoint = "";
   let payload: Record<string, string> = {};
 
   if (refreshToken) {
@@ -227,6 +227,8 @@ async function getSupabaseSession(
       ? `${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=password`
       : `${workerEnv.SUPABASE_URL}/auth/v1/signup`;
     payload = { email, password };
+  } else {
+    throw new Error("Sign in before using multiplayer.");
   }
 
   console.info({ event: "techrater.auth.supabase.begin", mode, refresh: Boolean(refreshToken) });
@@ -245,6 +247,9 @@ async function getSupabaseSession(
 
   if (mode === "email-sign-up" && session.user && (!session.access_token || !session.refresh_token)) {
     return { confirmationRequired: true, email: session.user.email };
+  }
+  if (!session.user?.email || session.user.is_anonymous === true) {
+    throw new Error("Anonymous sessions are no longer supported. Sign in again.");
   }
   return { session };
 }
