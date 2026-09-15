@@ -72,6 +72,11 @@ interface BrowserAuthRequest {
   password?: unknown;
 }
 
+interface BrowserProfileRequest {
+  refreshToken?: unknown;
+  displayName?: unknown;
+}
+
 const DEFAULT_CLIENT_ORIGIN = "https://techmino.what-the-fuck.men";
 
 function configuredClientOrigins(workerEnv: WorkerEnv): Set<string> {
@@ -129,13 +134,68 @@ function supabaseError(payload: unknown, status: number): string {
 function accountDisplayName(session: SupabaseSession): string {
   const metadata = session.user?.user_metadata;
   if (metadata) {
-    for (const key of ["full_name", "name", "user_name", "preferred_username"]) {
+    for (const key of ["display_name", "full_name", "name", "user_name", "preferred_username"]) {
       if (typeof metadata[key] === "string" && metadata[key]) return metadata[key].slice(0, 24);
     }
   }
   const email = session.user?.email;
   if (email) return email.split("@", 1)[0].slice(0, 24);
   return "Guest";
+}
+
+async function updateBrowserProfile(request: Request, workerEnv: WorkerEnv): Promise<Response> {
+  try {
+    const profile = await request.json<BrowserProfileRequest>();
+    const refreshToken = typeof profile.refreshToken === "string" ? profile.refreshToken : "";
+    const displayName = typeof profile.displayName === "string" ? profile.displayName.trim() : "";
+    if (!refreshToken) throw new Error("The account session is missing.");
+    if (!displayName || displayName.length > 24) {
+      throw new Error("Display name must be between 1 and 24 characters.");
+    }
+
+    const refreshResponse = await fetch(`${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+      method: "POST",
+      headers: {
+        apikey: workerEnv.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${workerEnv.SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    const session = await refreshResponse.json<SupabaseSession & Record<string, unknown>>();
+    if (!refreshResponse.ok) throw new Error(supabaseError(session, refreshResponse.status));
+    if (!session.access_token || !session.refresh_token || !session.user) {
+      throw new Error("Supabase returned an incomplete session.");
+    }
+
+    const updateResponse = await fetch(`${workerEnv.SUPABASE_URL}/auth/v1/user`, {
+      method: "PUT",
+      headers: {
+        apikey: workerEnv.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ data: { display_name: displayName } }),
+    });
+    const updatedUser = await updateResponse.json<SupabaseSession["user"] & Record<string, unknown>>();
+    if (!updateResponse.ok) throw new Error(supabaseError(updatedUser, updateResponse.status));
+
+    const updatedSession: SupabaseSession = { ...session, user: updatedUser };
+    return Response.json({
+      refreshToken: session.refresh_token,
+      account: {
+        email: updatedUser.email || null,
+        isAnonymous: updatedUser.is_anonymous === true || !updatedUser.email,
+        displayName: accountDisplayName(updatedSession),
+      },
+    }, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    console.error({ event: "techrater.profile.error", error: errorMessage(error) });
+    return Response.json({ error: errorMessage(error) }, {
+      status: 400,
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
 }
 
 async function getSupabaseSession(
@@ -356,11 +416,14 @@ export default {
       return new Response("Forbidden origin", { status: 403 });
     }
 
-    if (url.pathname === "/_worker/auth/session" && request.method === "OPTIONS") {
+    if ((url.pathname === "/_worker/auth/session" || url.pathname === "/_worker/auth/profile") && request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
     if (url.pathname === "/_worker/auth/session" && request.method === "POST") {
       return addCors(await createBrowserSession(request, workerEnv, container), origin);
+    }
+    if (url.pathname === "/_worker/auth/profile" && request.method === "POST") {
+      return addCors(await updateBrowserProfile(request, workerEnv), origin);
     }
     if (url.pathname === "/techmino/ws/v1" && upgrade) {
       return authenticatedWebSocket(request, container);
