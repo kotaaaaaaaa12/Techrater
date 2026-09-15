@@ -55,19 +55,41 @@ export class TechraterContainer extends Container {
 }
 
 interface SupabaseSession {
-  access_token: string;
-  refresh_token: string;
-  user: { id: string };
+  access_token?: string;
+  refresh_token?: string;
+  user?: {
+    id: string;
+    email?: string;
+    is_anonymous?: boolean;
+    user_metadata?: Record<string, unknown>;
+  };
+}
+
+interface BrowserAuthRequest {
+  mode?: "guest" | "email-sign-in" | "email-sign-up";
+  refreshToken?: unknown;
+  email?: unknown;
+  password?: unknown;
+}
+
+const DEFAULT_CLIENT_ORIGIN = "https://techmino.what-the-fuck.men";
+
+function configuredClientOrigins(workerEnv: WorkerEnv): Set<string> {
+  const origins = new Set<string>([DEFAULT_CLIENT_ORIGIN]);
+  for (const value of workerEnv.CLIENT_ORIGIN.split(",")) {
+    try {
+      origins.add(new URL(value.trim()).origin);
+    } catch {
+      // Ignore malformed optional entries; the deployment default remains available.
+    }
+  }
+  return origins;
 }
 
 function allowedOrigin(request: Request, workerEnv: WorkerEnv): string | null {
   const requestOrigin = request.headers.get("Origin");
   if (!requestOrigin) return null;
-  try {
-    return requestOrigin === new URL(workerEnv.CLIENT_ORIGIN).origin ? requestOrigin : null;
-  } catch {
-    return null;
-  }
+  return configuredClientOrigins(workerEnv).has(requestOrigin) ? requestOrigin : null;
 }
 
 function corsHeaders(origin: string): Headers {
@@ -94,19 +116,60 @@ async function stablePlayerId(userId: string): Promise<number> {
   return Number((value & ((1n << 52n) - 1n)) + 1n);
 }
 
-async function getSupabaseSession(request: Request, workerEnv: WorkerEnv): Promise<SupabaseSession> {
-  let refreshToken = "";
+function supabaseError(payload: unknown, status: number): string {
+  if (payload && typeof payload === "object") {
+    const body = payload as Record<string, unknown>;
+    for (const key of ["msg", "error_description", "message", "error"]) {
+      if (typeof body[key] === "string" && body[key]) return body[key];
+    }
+  }
+  return `Supabase authentication failed (${status})`;
+}
+
+function accountDisplayName(session: SupabaseSession): string {
+  const metadata = session.user?.user_metadata;
+  if (metadata) {
+    for (const key of ["full_name", "name", "user_name", "preferred_username"]) {
+      if (typeof metadata[key] === "string" && metadata[key]) return metadata[key].slice(0, 24);
+    }
+  }
+  const email = session.user?.email;
+  if (email) return email.split("@", 1)[0].slice(0, 24);
+  return "Guest";
+}
+
+async function getSupabaseSession(
+  request: Request,
+  workerEnv: WorkerEnv,
+): Promise<{ session?: SupabaseSession; confirmationRequired?: boolean; email?: string }> {
+  let auth: BrowserAuthRequest = {};
   try {
-    const body = await request.json<{ refreshToken?: unknown }>();
-    if (typeof body.refreshToken === "string") refreshToken = body.refreshToken;
+    auth = await request.json<BrowserAuthRequest>();
   } catch {
     // An empty request creates a new anonymous account.
   }
 
-  console.info({ event: "techrater.auth.supabase.begin", refresh: Boolean(refreshToken) });
-  const endpoint = refreshToken
-    ? `${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`
-    : `${workerEnv.SUPABASE_URL}/auth/v1/signup`;
+  const refreshToken = typeof auth.refreshToken === "string" ? auth.refreshToken : "";
+  const mode = auth.mode || (refreshToken ? "guest" : "guest");
+  let endpoint = `${workerEnv.SUPABASE_URL}/auth/v1/signup`;
+  let payload: Record<string, string> = {};
+
+  if (refreshToken) {
+    endpoint = `${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`;
+    payload = { refresh_token: refreshToken };
+  } else if (mode === "email-sign-in" || mode === "email-sign-up") {
+    const email = typeof auth.email === "string" ? auth.email.trim() : "";
+    const password = typeof auth.password === "string" ? auth.password : "";
+    if (!email || email.length > 254 || password.length < 8 || password.length > 128) {
+      throw new Error("Enter a valid email address and a password between 8 and 128 characters.");
+    }
+    endpoint = mode === "email-sign-in"
+      ? `${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=password`
+      : `${workerEnv.SUPABASE_URL}/auth/v1/signup`;
+    payload = { email, password };
+  }
+
+  console.info({ event: "techrater.auth.supabase.begin", mode, refresh: Boolean(refreshToken) });
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
@@ -114,11 +177,16 @@ async function getSupabaseSession(request: Request, workerEnv: WorkerEnv): Promi
       Authorization: `Bearer ${workerEnv.SUPABASE_ANON_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
+    body: JSON.stringify(payload),
   });
   console.info({ event: "techrater.auth.supabase.response", status: response.status });
-  if (!response.ok) throw new Error(`Supabase authentication failed (${response.status})`);
-  return response.json<SupabaseSession>();
+  const session = await response.json<SupabaseSession & Record<string, unknown>>();
+  if (!response.ok) throw new Error(supabaseError(session, response.status));
+
+  if (mode === "email-sign-up" && session.user && (!session.access_token || !session.refresh_token)) {
+    return { confirmationRequired: true, email: session.user.email };
+  }
+  return { session };
 }
 
 async function createBrowserSession(
@@ -127,8 +195,15 @@ async function createBrowserSession(
   container: DurableObjectStub<TechraterContainer>,
 ): Promise<Response> {
   try {
-    const session = await getSupabaseSession(request, workerEnv);
-    if (!session.access_token || !session.refresh_token || !session.user?.id) {
+    const authResult = await getSupabaseSession(request, workerEnv);
+    if (authResult.confirmationRequired) {
+      return Response.json({
+        confirmationRequired: true,
+        email: authResult.email,
+      }, { headers: { "Cache-Control": "no-store" } });
+    }
+    const session = authResult.session;
+    if (!session || !session.access_token || !session.refresh_token || !session.user?.id) {
       throw new Error("Supabase returned an incomplete session");
     }
 
@@ -153,6 +228,11 @@ async function createBrowserSession(
       accessToken: oauthBody.data,
       refreshToken: session.refresh_token,
       playerId,
+      account: {
+        email: session.user.email || null,
+        isAnonymous: session.user.is_anonymous === true || !session.user.email,
+        displayName: accountDisplayName(session),
+      },
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error({ event: "techrater.auth.error", error: errorMessage(error) });
@@ -161,6 +241,35 @@ async function createBrowserSession(
       headers: { "Cache-Control": "no-store" },
     });
   }
+}
+
+function googleAuthRedirect(request: Request, workerEnv: WorkerEnv): Response {
+  const requestUrl = new URL(request.url);
+  const allowedOrigins = configuredClientOrigins(workerEnv);
+  const returnTo = requestUrl.searchParams.get("return_to");
+  if (!returnTo) return new Response("Missing return URL", { status: 400 });
+
+  let callback: URL;
+  try {
+    callback = new URL(returnTo);
+  } catch {
+    return new Response("Invalid return URL", { status: 400 });
+  }
+  if (!allowedOrigins.has(callback.origin)) {
+    console.warn({
+      event: "techrater.auth.google.rejected",
+      returnOrigin: callback.origin,
+      allowedOrigins: [...allowedOrigins],
+    });
+    return new Response("Invalid return origin", { status: 403 });
+  }
+  callback.hash = "";
+  callback.search = "?techmino_auth=google";
+
+  const authorizeUrl = new URL("/auth/v1/authorize", workerEnv.SUPABASE_URL);
+  authorizeUrl.searchParams.set("provider", "google");
+  authorizeUrl.searchParams.set("redirect_to", callback.href);
+  return Response.redirect(authorizeUrl.href, 302);
 }
 
 async function authenticatedWebSocket(
@@ -231,9 +340,19 @@ export default {
       return healthCheck(request, container);
     }
 
+    if (url.pathname === "/_worker/auth/google" && request.method === "GET") {
+      return googleAuthRedirect(request, workerEnv);
+    }
+
     const origin = allowedOrigin(request, workerEnv);
     if (!origin) {
-      console.warn({ event: "techrater.request.rejected", path: url.pathname, reason: "forbidden_origin" });
+      console.warn({
+        event: "techrater.request.rejected",
+        path: url.pathname,
+        reason: "forbidden_origin",
+        requestOrigin: request.headers.get("Origin"),
+        allowedOrigins: [...configuredClientOrigins(workerEnv)],
+      });
       return new Response("Forbidden origin", { status: 403 });
     }
 

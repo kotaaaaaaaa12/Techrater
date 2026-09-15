@@ -4,6 +4,9 @@
   "main": "cloudflare/src/index.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "CLIENT_ORIGIN": "https://techmino.what-the-fuck.men"
+  },
   "containers": [
     {
       "class_name": "TechraterContainer",
