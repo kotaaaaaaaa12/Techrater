@@ -77,7 +77,35 @@ interface BrowserProfileRequest {
   displayName?: unknown;
 }
 
+interface BrowserCloudSaveRequest {
+  refreshToken?: unknown;
+  expectedRevision?: unknown;
+  payload?: unknown;
+}
+
+interface CloudSavePayload {
+  schemaVersion: 1;
+  files: Record<string, string>;
+}
+
+interface CloudSaveRow {
+  revision: number;
+  payload: CloudSavePayload;
+  updated_at: string;
+}
+
 const DEFAULT_CLIENT_ORIGIN = "https://techmino.what-the-fuck.men";
+const CLOUD_SAVE_MAX_BYTES = 1_500_000;
+const CLOUD_SAVE_MAX_FILES = 512;
+const CLOUD_SAVE_FIXED_FILES = new Set([
+  "conf/data",
+  "conf/unlock",
+  "conf/settings",
+  "conf/key",
+  "conf/virtualkey",
+  "conf/vkSave1",
+  "conf/vkSave2",
+]);
 
 function configuredClientOrigins(workerEnv: WorkerEnv): Set<string> {
   const origins = new Set<string>([DEFAULT_CLIENT_ORIGIN]);
@@ -129,6 +157,157 @@ function supabaseError(payload: unknown, status: number): string {
     }
   }
   return `Supabase authentication failed (${status})`;
+}
+
+function isCloudSavePath(path: string): boolean {
+  return CLOUD_SAVE_FIXED_FILES.has(path) || /^record\/[A-Za-z0-9_-]+\.rec$/.test(path);
+}
+
+function validateCloudSavePayload(value: unknown): CloudSavePayload {
+  if (!value || typeof value !== "object") throw new Error("Cloud save payload must be an object.");
+  const payload = value as Record<string, unknown>;
+  if (payload.schemaVersion !== 1 || !payload.files || typeof payload.files !== "object" || Array.isArray(payload.files)) {
+    throw new Error("Cloud save payload has an unsupported format.");
+  }
+
+  const entries = Object.entries(payload.files as Record<string, unknown>);
+  if (entries.length > CLOUD_SAVE_MAX_FILES) throw new Error("Cloud save contains too many files.");
+  const files: Record<string, string> = {};
+  for (const [path, content] of entries) {
+    if (!isCloudSavePath(path)) throw new Error(`Cloud save contains an unsupported path: ${path}`);
+    if (typeof content !== "string") throw new Error(`Cloud save file is not text: ${path}`);
+    files[path] = content;
+  }
+
+  const normalized: CloudSavePayload = { schemaVersion: 1, files };
+  if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength > CLOUD_SAVE_MAX_BYTES) {
+    throw new Error("Cloud save exceeds the 1.5 MB limit.");
+  }
+  return normalized;
+}
+
+async function refreshSupabaseSession(refreshToken: string, workerEnv: WorkerEnv): Promise<Required<Pick<SupabaseSession, "access_token" | "refresh_token" | "user">>> {
+  if (!refreshToken) throw new Error("The account session is missing.");
+  const response = await fetch(`${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: {
+      apikey: workerEnv.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${workerEnv.SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  const session = await response.json<SupabaseSession & Record<string, unknown>>();
+  if (!response.ok) throw new Error(supabaseError(session, response.status));
+  if (!session.access_token || !session.refresh_token || !session.user?.id || !session.user.email || session.user.is_anonymous === true) {
+    throw new Error("Supabase returned an incomplete account session.");
+  }
+  return {
+    access_token: session.access_token,
+    refresh_token: session.refresh_token,
+    user: session.user,
+  };
+}
+
+function dataApiHeaders(workerEnv: WorkerEnv, accessToken: string, prefer?: string): Headers {
+  const headers = new Headers({
+    apikey: workerEnv.SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+  });
+  if (prefer) headers.set("Prefer", prefer);
+  return headers;
+}
+
+async function loadBrowserCloudSave(request: Request, workerEnv: WorkerEnv): Promise<Response> {
+  try {
+    const body = await request.json<BrowserCloudSaveRequest>();
+    const refreshToken = typeof body.refreshToken === "string" ? body.refreshToken : "";
+    const session = await refreshSupabaseSession(refreshToken, workerEnv);
+    const url = new URL("/rest/v1/techmino_cloud_saves", workerEnv.SUPABASE_URL);
+    url.searchParams.set("select", "revision,payload,updated_at");
+    url.searchParams.set("user_id", `eq.${session.user.id}`);
+    url.searchParams.set("limit", "1");
+    const response = await fetch(url, {
+      headers: dataApiHeaders(workerEnv, session.access_token),
+    });
+    const result = await response.json<unknown>();
+    if (!response.ok) throw new Error(supabaseError(result, response.status));
+    const row = Array.isArray(result) && result.length ? result[0] as CloudSaveRow : null;
+    return Response.json({
+      refreshToken: session.refresh_token,
+      save: row ? {
+        revision: row.revision,
+        payload: validateCloudSavePayload(row.payload),
+        updatedAt: row.updated_at,
+      } : null,
+    }, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    console.error({ event: "techrater.cloud_save.load.error", error: errorMessage(error) });
+    return Response.json({ error: errorMessage(error) }, {
+      status: 400,
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
+}
+
+async function storeBrowserCloudSave(request: Request, workerEnv: WorkerEnv): Promise<Response> {
+  try {
+    const body = await request.json<BrowserCloudSaveRequest>();
+    const refreshToken = typeof body.refreshToken === "string" ? body.refreshToken : "";
+    const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : Number.NaN;
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error("Cloud save revision is invalid.");
+    }
+    const payload = validateCloudSavePayload(body.payload);
+    const session = await refreshSupabaseSession(refreshToken, workerEnv);
+    const revision = expectedRevision + 1;
+    const updatedAt = new Date().toISOString();
+    const url = new URL("/rest/v1/techmino_cloud_saves", workerEnv.SUPABASE_URL);
+    let method: "POST" | "PATCH";
+    if (expectedRevision === 0) {
+      method = "POST";
+    } else {
+      method = "PATCH";
+      url.searchParams.set("user_id", `eq.${session.user.id}`);
+      url.searchParams.set("revision", `eq.${expectedRevision}`);
+    }
+
+    const response = await fetch(url, {
+      method,
+      headers: dataApiHeaders(workerEnv, session.access_token, "return=representation"),
+      body: JSON.stringify({
+        user_id: session.user.id,
+        revision,
+        payload,
+        updated_at: updatedAt,
+      }),
+    });
+    const result = await response.json<unknown>();
+    if (response.status === 409 || (response.ok && Array.isArray(result) && result.length === 0)) {
+      return Response.json({
+        error: "Cloud save changed on another device.",
+        conflict: true,
+        refreshToken: session.refresh_token,
+      }, { status: 409, headers: { "Cache-Control": "no-store" } });
+    }
+    if (!response.ok) throw new Error(supabaseError(result, response.status));
+    const row = Array.isArray(result) && result.length ? result[0] as CloudSaveRow : null;
+    if (!row) throw new Error("Supabase did not return the saved cloud data.");
+    return Response.json({
+      refreshToken: session.refresh_token,
+      save: {
+        revision: row.revision,
+        updatedAt: row.updated_at,
+      },
+    }, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    console.error({ event: "techrater.cloud_save.store.error", error: errorMessage(error) });
+    return Response.json({ error: errorMessage(error) }, {
+      status: 400,
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
 }
 
 function accountDisplayName(session: SupabaseSession): string {
@@ -421,7 +600,10 @@ export default {
       return new Response("Forbidden origin", { status: 403 });
     }
 
-    if ((url.pathname === "/_worker/auth/session" || url.pathname === "/_worker/auth/profile") && request.method === "OPTIONS") {
+    if ((url.pathname === "/_worker/auth/session"
+      || url.pathname === "/_worker/auth/profile"
+      || url.pathname === "/_worker/save/load"
+      || url.pathname === "/_worker/save/store") && request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
     if (url.pathname === "/_worker/auth/session" && request.method === "POST") {
@@ -429,6 +611,12 @@ export default {
     }
     if (url.pathname === "/_worker/auth/profile" && request.method === "POST") {
       return addCors(await updateBrowserProfile(request, workerEnv), origin);
+    }
+    if (url.pathname === "/_worker/save/load" && request.method === "POST") {
+      return addCors(await loadBrowserCloudSave(request, workerEnv), origin);
+    }
+    if (url.pathname === "/_worker/save/store" && request.method === "POST") {
+      return addCors(await storeBrowserCloudSave(request, workerEnv), origin);
     }
     if (url.pathname === "/techmino/ws/v1" && upgrade) {
       return authenticatedWebSocket(request, container);

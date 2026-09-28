@@ -25,5 +25,47 @@ create table if not exists public.notice (
   ja_jp text
 );
 
+create table if not exists public.techmino_cloud_saves (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  revision bigint not null default 1 check (revision > 0),
+  payload jsonb not null,
+  updated_at timestamp with time zone not null default now(),
+  constraint techmino_cloud_saves_payload_size check (octet_length(payload::text) <= 1500000)
+);
+
+alter table public.techmino_cloud_saves enable row level security;
+
+drop policy if exists "Users can read their Techmino save" on public.techmino_cloud_saves;
+create policy "Users can read their Techmino save"
+on public.techmino_cloud_saves
+for select
+to authenticated
+using ((select auth.uid()) = user_id);
+
+drop policy if exists "Users can insert their Techmino save" on public.techmino_cloud_saves;
+create policy "Users can insert their Techmino save"
+on public.techmino_cloud_saves
+for insert
+to authenticated
+with check ((select auth.uid()) = user_id);
+
+drop policy if exists "Users can update their Techmino save" on public.techmino_cloud_saves;
+create policy "Users can update their Techmino save"
+on public.techmino_cloud_saves
+for update
+to authenticated
+using ((select auth.uid()) = user_id)
+with check ((select auth.uid()) = user_id);
+
+drop policy if exists "Users can delete their Techmino save" on public.techmino_cloud_saves;
+create policy "Users can delete their Techmino save"
+on public.techmino_cloud_saves
+for delete
+to authenticated
+using ((select auth.uid()) = user_id);
+
 revoke all on table public.data from anon, authenticated;
 revoke all on table public.notice from anon, authenticated;
+revoke all on table public.techmino_cloud_saves from anon;
+grant select, insert, update, delete on table public.techmino_cloud_saves to authenticated;
+grant select, insert, update, delete on table public.techmino_cloud_saves to service_role;
