@@ -7,7 +7,7 @@
 #include <drogon/plugins/Plugin.h>
 #include <helpers/RedisHelper.h>
 #include <helpers/RequestJson.h>
-#include <models/Data.h>
+#include <helpers/D1Store.h>
 #include <structures/ExceptionHandlers.h>
 
 namespace techmino::plugins {
@@ -54,8 +54,6 @@ namespace techmino::plugins {
         std::chrono::seconds _ipInterval{}, _verifyInterval{}, _loginInterval{},
                 _accessExpiration{}, _refreshExpiration{};
         uint64_t _ipMaxCount{}, _verifyMaxCount{}, _loginMaxCount{};
-
-        drogon::orm::Mapper<drogon_model::techrater::Data> _dataMapper;
 
         std::string _generateAccessToken(const std::string& playerId);
     };

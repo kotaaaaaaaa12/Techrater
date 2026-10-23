@@ -1,16 +1,19 @@
 import { env } from "cloudflare:workers";
 import { Container, getContainer, type StopParams } from "@cloudflare/containers";
+import {
+  createBrowserSession,
+  loadBrowserCloudSave,
+  logoutBrowserSession,
+  storeBrowserCloudSave,
+  updateBrowserProfile,
+} from "./accounts";
+import { coreDataRequest } from "./core-data";
 
-interface WorkerEnv {
+export interface WorkerEnv {
   TECHRATER: DurableObjectNamespace<TechraterContainer>;
+  TECHMINO_DB: D1Database;
   CLIENT_ORIGIN: string;
-  SUPABASE_URL: string;
-  SUPABASE_ANON_KEY: string;
-  SUPABASE_DB_HOST: string;
-  SUPABASE_DB_PORT: string;
-  SUPABASE_DB_NAME: string;
-  SUPABASE_DB_USER: string;
-  SUPABASE_DB_PASSWORD: string;
+  TECHRATER_DATA_ORIGIN: string;
   TECHRATER_AUTH_TOKEN: string;
 }
 
@@ -28,11 +31,7 @@ export class TechraterContainer extends Container {
   defaultPort = 8080;
   sleepAfter = "30m";
   envVars: Record<string, string> = {
-    SUPABASE_DB_HOST: env.SUPABASE_DB_HOST,
-    SUPABASE_DB_PORT: env.SUPABASE_DB_PORT,
-    SUPABASE_DB_NAME: env.SUPABASE_DB_NAME,
-    SUPABASE_DB_USER: env.SUPABASE_DB_USER,
-    SUPABASE_DB_PASSWORD: env.SUPABASE_DB_PASSWORD,
+    TECHRATER_DATA_ORIGIN: env.TECHRATER_DATA_ORIGIN,
     TECHRATER_AUTH_TOKEN: env.TECHRATER_AUTH_TOKEN,
   };
 
@@ -54,58 +53,7 @@ export class TechraterContainer extends Container {
   }
 }
 
-interface SupabaseSession {
-  access_token?: string;
-  refresh_token?: string;
-  user?: {
-    id: string;
-    email?: string;
-    is_anonymous?: boolean;
-    user_metadata?: Record<string, unknown>;
-  };
-}
-
-interface BrowserAuthRequest {
-  mode?: "email-sign-in" | "email-sign-up";
-  refreshToken?: unknown;
-  email?: unknown;
-  password?: unknown;
-}
-
-interface BrowserProfileRequest {
-  refreshToken?: unknown;
-  displayName?: unknown;
-}
-
-interface BrowserCloudSaveRequest {
-  refreshToken?: unknown;
-  expectedRevision?: unknown;
-  payload?: unknown;
-}
-
-interface CloudSavePayload {
-  schemaVersion: 1;
-  files: Record<string, string>;
-}
-
-interface CloudSaveRow {
-  revision: number;
-  payload: CloudSavePayload;
-  updated_at: string;
-}
-
 const DEFAULT_CLIENT_ORIGIN = "https://techmino.what-the-fuck.men";
-const CLOUD_SAVE_MAX_BYTES = 1_500_000;
-const CLOUD_SAVE_MAX_FILES = 512;
-const CLOUD_SAVE_FIXED_FILES = new Set([
-  "conf/data",
-  "conf/unlock",
-  "conf/settings",
-  "conf/key",
-  "conf/virtualkey",
-  "conf/vkSave1",
-  "conf/vkSave2",
-]);
 
 function configuredClientOrigins(workerEnv: WorkerEnv): Set<string> {
   const origins = new Set<string>([DEFAULT_CLIENT_ORIGIN]);
@@ -139,381 +87,6 @@ function addCors(response: Response, origin: string): Response {
   const headers = new Headers(response.headers);
   for (const [name, value] of corsHeaders(origin)) headers.set(name, value);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
-}
-
-async function stablePlayerId(userId: string): Promise<number> {
-  const input = new TextEncoder().encode(userId);
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
-  let value = 0n;
-  for (let index = 0; index < 7; index += 1) value = (value << 8n) | BigInt(digest[index]);
-  return Number((value & ((1n << 52n) - 1n)) + 1n);
-}
-
-function supabaseError(payload: unknown, status: number): string {
-  if (payload && typeof payload === "object") {
-    const body = payload as Record<string, unknown>;
-    for (const key of ["msg", "error_description", "message", "error"]) {
-      if (typeof body[key] === "string" && body[key]) return body[key];
-    }
-  }
-  return `Supabase authentication failed (${status})`;
-}
-
-function isCloudSavePath(path: string): boolean {
-  return CLOUD_SAVE_FIXED_FILES.has(path) || /^record\/[A-Za-z0-9_-]+\.rec$/.test(path);
-}
-
-function validateCloudSavePayload(value: unknown): CloudSavePayload {
-  if (!value || typeof value !== "object") throw new Error("Cloud save payload must be an object.");
-  const payload = value as Record<string, unknown>;
-  if (payload.schemaVersion !== 1 || !payload.files || typeof payload.files !== "object" || Array.isArray(payload.files)) {
-    throw new Error("Cloud save payload has an unsupported format.");
-  }
-
-  const entries = Object.entries(payload.files as Record<string, unknown>);
-  if (entries.length > CLOUD_SAVE_MAX_FILES) throw new Error("Cloud save contains too many files.");
-  const files: Record<string, string> = {};
-  for (const [path, content] of entries) {
-    if (!isCloudSavePath(path)) throw new Error(`Cloud save contains an unsupported path: ${path}`);
-    if (typeof content !== "string") throw new Error(`Cloud save file is not text: ${path}`);
-    files[path] = content;
-  }
-
-  const normalized: CloudSavePayload = { schemaVersion: 1, files };
-  if (new TextEncoder().encode(JSON.stringify(normalized)).byteLength > CLOUD_SAVE_MAX_BYTES) {
-    throw new Error("Cloud save exceeds the 1.5 MB limit.");
-  }
-  return normalized;
-}
-
-async function refreshSupabaseSession(refreshToken: string, workerEnv: WorkerEnv): Promise<Required<Pick<SupabaseSession, "access_token" | "refresh_token" | "user">>> {
-  if (!refreshToken) throw new Error("The account session is missing.");
-  const response = await fetch(`${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-    method: "POST",
-    headers: {
-      apikey: workerEnv.SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${workerEnv.SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ refresh_token: refreshToken }),
-  });
-  const session = await response.json<SupabaseSession & Record<string, unknown>>();
-  if (!response.ok) throw new Error(supabaseError(session, response.status));
-  if (!session.access_token || !session.refresh_token || !session.user?.id || !session.user.email || session.user.is_anonymous === true) {
-    throw new Error("Supabase returned an incomplete account session.");
-  }
-  return {
-    access_token: session.access_token,
-    refresh_token: session.refresh_token,
-    user: session.user,
-  };
-}
-
-function dataApiHeaders(workerEnv: WorkerEnv, accessToken: string, prefer?: string): Headers {
-  const headers = new Headers({
-    apikey: workerEnv.SUPABASE_ANON_KEY,
-    Authorization: `Bearer ${accessToken}`,
-    "Content-Type": "application/json",
-  });
-  if (prefer) headers.set("Prefer", prefer);
-  return headers;
-}
-
-async function loadBrowserCloudSave(request: Request, workerEnv: WorkerEnv): Promise<Response> {
-  try {
-    const body = await request.json<BrowserCloudSaveRequest>();
-    const refreshToken = typeof body.refreshToken === "string" ? body.refreshToken : "";
-    const session = await refreshSupabaseSession(refreshToken, workerEnv);
-    const url = new URL("/rest/v1/techmino_cloud_saves", workerEnv.SUPABASE_URL);
-    url.searchParams.set("select", "revision,payload,updated_at");
-    url.searchParams.set("user_id", `eq.${session.user.id}`);
-    url.searchParams.set("limit", "1");
-    const response = await fetch(url, {
-      headers: dataApiHeaders(workerEnv, session.access_token),
-    });
-    const result = await response.json<unknown>();
-    if (!response.ok) throw new Error(supabaseError(result, response.status));
-    const row = Array.isArray(result) && result.length ? result[0] as CloudSaveRow : null;
-    return Response.json({
-      refreshToken: session.refresh_token,
-      save: row ? {
-        revision: row.revision,
-        payload: validateCloudSavePayload(row.payload),
-        updatedAt: row.updated_at,
-      } : null,
-    }, { headers: { "Cache-Control": "no-store" } });
-  } catch (error) {
-    console.error({ event: "techrater.cloud_save.load.error", error: errorMessage(error) });
-    return Response.json({ error: errorMessage(error) }, {
-      status: 400,
-      headers: { "Cache-Control": "no-store" },
-    });
-  }
-}
-
-async function storeBrowserCloudSave(request: Request, workerEnv: WorkerEnv): Promise<Response> {
-  try {
-    const body = await request.json<BrowserCloudSaveRequest>();
-    const refreshToken = typeof body.refreshToken === "string" ? body.refreshToken : "";
-    const expectedRevision = typeof body.expectedRevision === "number" ? body.expectedRevision : Number.NaN;
-    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
-      throw new Error("Cloud save revision is invalid.");
-    }
-    const payload = validateCloudSavePayload(body.payload);
-    const session = await refreshSupabaseSession(refreshToken, workerEnv);
-    const revision = expectedRevision + 1;
-    const updatedAt = new Date().toISOString();
-    const url = new URL("/rest/v1/techmino_cloud_saves", workerEnv.SUPABASE_URL);
-    let method: "POST" | "PATCH";
-    if (expectedRevision === 0) {
-      method = "POST";
-    } else {
-      method = "PATCH";
-      url.searchParams.set("user_id", `eq.${session.user.id}`);
-      url.searchParams.set("revision", `eq.${expectedRevision}`);
-    }
-
-    const response = await fetch(url, {
-      method,
-      headers: dataApiHeaders(workerEnv, session.access_token, "return=representation"),
-      body: JSON.stringify({
-        user_id: session.user.id,
-        revision,
-        payload,
-        updated_at: updatedAt,
-      }),
-    });
-    const result = await response.json<unknown>();
-    if (response.status === 409 || (response.ok && Array.isArray(result) && result.length === 0)) {
-      return Response.json({
-        error: "Cloud save changed on another device.",
-        conflict: true,
-        refreshToken: session.refresh_token,
-      }, { status: 409, headers: { "Cache-Control": "no-store" } });
-    }
-    if (!response.ok) throw new Error(supabaseError(result, response.status));
-    const row = Array.isArray(result) && result.length ? result[0] as CloudSaveRow : null;
-    if (!row) throw new Error("Supabase did not return the saved cloud data.");
-    return Response.json({
-      refreshToken: session.refresh_token,
-      save: {
-        revision: row.revision,
-        updatedAt: row.updated_at,
-      },
-    }, { headers: { "Cache-Control": "no-store" } });
-  } catch (error) {
-    console.error({ event: "techrater.cloud_save.store.error", error: errorMessage(error) });
-    return Response.json({ error: errorMessage(error) }, {
-      status: 400,
-      headers: { "Cache-Control": "no-store" },
-    });
-  }
-}
-
-function accountDisplayName(session: SupabaseSession): string {
-  const metadata = session.user?.user_metadata;
-  if (metadata) {
-    for (const key of ["display_name", "full_name", "name", "user_name", "preferred_username"]) {
-      if (typeof metadata[key] === "string" && metadata[key]) return metadata[key].slice(0, 24);
-    }
-  }
-  const email = session.user?.email;
-  if (email) return email.split("@", 1)[0].slice(0, 24);
-  return "Guest";
-}
-
-async function updateBrowserProfile(request: Request, workerEnv: WorkerEnv): Promise<Response> {
-  try {
-    const profile = await request.json<BrowserProfileRequest>();
-    const refreshToken = typeof profile.refreshToken === "string" ? profile.refreshToken : "";
-    const displayName = typeof profile.displayName === "string" ? profile.displayName.trim() : "";
-    if (!refreshToken) throw new Error("The account session is missing.");
-    if (!displayName || displayName.length > 24) {
-      throw new Error("Display name must be between 1 and 24 characters.");
-    }
-
-    const refreshResponse = await fetch(`${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-      method: "POST",
-      headers: {
-        apikey: workerEnv.SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${workerEnv.SUPABASE_ANON_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ refresh_token: refreshToken }),
-    });
-    const session = await refreshResponse.json<SupabaseSession & Record<string, unknown>>();
-    if (!refreshResponse.ok) throw new Error(supabaseError(session, refreshResponse.status));
-    if (!session.access_token || !session.refresh_token || !session.user) {
-      throw new Error("Supabase returned an incomplete session.");
-    }
-
-    const updateResponse = await fetch(`${workerEnv.SUPABASE_URL}/auth/v1/user`, {
-      method: "PUT",
-      headers: {
-        apikey: workerEnv.SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${session.access_token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ data: { display_name: displayName } }),
-    });
-    const updatedUser = await updateResponse.json<SupabaseSession["user"] & Record<string, unknown>>();
-    if (!updateResponse.ok) throw new Error(supabaseError(updatedUser, updateResponse.status));
-
-    const updatedSession: SupabaseSession = { ...session, user: updatedUser };
-    return Response.json({
-      refreshToken: session.refresh_token,
-      account: {
-        email: updatedUser.email || null,
-        isAnonymous: updatedUser.is_anonymous === true || !updatedUser.email,
-        displayName: accountDisplayName(updatedSession),
-      },
-    }, { headers: { "Cache-Control": "no-store" } });
-  } catch (error) {
-    console.error({ event: "techrater.profile.error", error: errorMessage(error) });
-    return Response.json({ error: errorMessage(error) }, {
-      status: 400,
-      headers: { "Cache-Control": "no-store" },
-    });
-  }
-}
-
-async function getSupabaseSession(
-  request: Request,
-  workerEnv: WorkerEnv,
-): Promise<{ session?: SupabaseSession; confirmationRequired?: boolean; email?: string }> {
-  let auth: BrowserAuthRequest = {};
-  try {
-    auth = await request.json<BrowserAuthRequest>();
-  } catch {
-    // An empty request creates a new anonymous account.
-  }
-
-  const refreshToken = typeof auth.refreshToken === "string" ? auth.refreshToken : "";
-  const mode = auth.mode || (refreshToken ? "refresh" : "missing");
-  let endpoint = "";
-  let payload: Record<string, string> = {};
-
-  if (refreshToken) {
-    endpoint = `${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`;
-    payload = { refresh_token: refreshToken };
-  } else if (mode === "email-sign-in" || mode === "email-sign-up") {
-    const email = typeof auth.email === "string" ? auth.email.trim() : "";
-    const password = typeof auth.password === "string" ? auth.password : "";
-    if (!email || email.length > 254 || password.length < 8 || password.length > 128) {
-      throw new Error("Enter a valid email address and a password between 8 and 128 characters.");
-    }
-    endpoint = mode === "email-sign-in"
-      ? `${workerEnv.SUPABASE_URL}/auth/v1/token?grant_type=password`
-      : `${workerEnv.SUPABASE_URL}/auth/v1/signup`;
-    payload = { email, password };
-  } else {
-    throw new Error("Sign in before using multiplayer.");
-  }
-
-  console.info({ event: "techrater.auth.supabase.begin", mode, refresh: Boolean(refreshToken) });
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      apikey: workerEnv.SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${workerEnv.SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  console.info({ event: "techrater.auth.supabase.response", status: response.status });
-  const session = await response.json<SupabaseSession & Record<string, unknown>>();
-  if (!response.ok) throw new Error(supabaseError(session, response.status));
-
-  if (mode === "email-sign-up" && session.user && (!session.access_token || !session.refresh_token)) {
-    return { confirmationRequired: true, email: session.user.email };
-  }
-  if (!session.user?.email || session.user.is_anonymous === true) {
-    throw new Error("Anonymous sessions are no longer supported. Sign in again.");
-  }
-  return { session };
-}
-
-async function createBrowserSession(
-  request: Request,
-  workerEnv: WorkerEnv,
-  container: DurableObjectStub<TechraterContainer>,
-): Promise<Response> {
-  try {
-    const authResult = await getSupabaseSession(request, workerEnv);
-    if (authResult.confirmationRequired) {
-      return Response.json({
-        confirmationRequired: true,
-        email: authResult.email,
-      }, { headers: { "Cache-Control": "no-store" } });
-    }
-    const session = authResult.session;
-    if (!session || !session.access_token || !session.refresh_token || !session.user?.id) {
-      throw new Error("Supabase returned an incomplete session");
-    }
-
-    const playerId = await stablePlayerId(session.user.id);
-    console.info({ event: "techrater.auth.exchange.begin", playerId });
-    const oauthUrl = new URL(request.url);
-    oauthUrl.pathname = `/techmino/api/v1/auth/oauth/${encodeURIComponent(workerEnv.TECHRATER_AUTH_TOKEN)}`;
-    oauthUrl.search = "";
-    const oauthResponse = await container.fetch(new Request(oauthUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ playerId }),
-    }));
-    console.info({ event: "techrater.auth.exchange.response", playerId, status: oauthResponse.status });
-    const oauthBody = await oauthResponse.json<{ data?: string; message?: string }>();
-    if (!oauthResponse.ok || typeof oauthBody.data !== "string") {
-      throw new Error(oauthBody.message || `Techrater token exchange failed (${oauthResponse.status})`);
-    }
-
-    console.info({ event: "techrater.auth.complete", playerId });
-    return Response.json({
-      accessToken: oauthBody.data,
-      refreshToken: session.refresh_token,
-      playerId,
-      account: {
-        email: session.user.email || null,
-        isAnonymous: session.user.is_anonymous === true || !session.user.email,
-        displayName: accountDisplayName(session),
-      },
-    }, { headers: { "Cache-Control": "no-store" } });
-  } catch (error) {
-    console.error({ event: "techrater.auth.error", error: errorMessage(error) });
-    return Response.json({ error: errorMessage(error) }, {
-      status: 502,
-      headers: { "Cache-Control": "no-store" },
-    });
-  }
-}
-
-function googleAuthRedirect(request: Request, workerEnv: WorkerEnv): Response {
-  const requestUrl = new URL(request.url);
-  const allowedOrigins = configuredClientOrigins(workerEnv);
-  const returnTo = requestUrl.searchParams.get("return_to");
-  if (!returnTo) return new Response("Missing return URL", { status: 400 });
-
-  let callback: URL;
-  try {
-    callback = new URL(returnTo);
-  } catch {
-    return new Response("Invalid return URL", { status: 400 });
-  }
-  if (!allowedOrigins.has(callback.origin)) {
-    console.warn({
-      event: "techrater.auth.google.rejected",
-      returnOrigin: callback.origin,
-      allowedOrigins: [...allowedOrigins],
-    });
-    return new Response("Invalid return origin", { status: 403 });
-  }
-  callback.hash = "";
-  callback.search = "?techmino_auth=google";
-
-  const authorizeUrl = new URL("/auth/v1/authorize", workerEnv.SUPABASE_URL);
-  authorizeUrl.searchParams.set("provider", "google");
-  authorizeUrl.searchParams.set("redirect_to", callback.href);
-  return Response.redirect(authorizeUrl.href, 302);
 }
 
 async function authenticatedWebSocket(
@@ -567,6 +140,14 @@ async function healthCheck(request: Request, container: DurableObjectStub<Techra
   }
 }
 
+const API_PATHS = new Set([
+  "/_worker/auth/session",
+  "/_worker/auth/profile",
+  "/_worker/auth/logout",
+  "/_worker/save/load",
+  "/_worker/save/store",
+]);
+
 export default {
   async fetch(request, workerEnv): Promise<Response> {
     const url = new URL(request.url);
@@ -580,12 +161,12 @@ export default {
     });
     const container = getContainer(workerEnv.TECHRATER);
 
-    if (url.pathname === "/_worker/health" && request.method === "GET") {
-      return healthCheck(request, container);
+    if (url.pathname === "/_worker/internal/core-data" && request.method === "POST") {
+      return coreDataRequest(request, workerEnv);
     }
 
-    if (url.pathname === "/_worker/auth/google" && request.method === "GET") {
-      return googleAuthRedirect(request, workerEnv);
+    if (url.pathname === "/_worker/health" && request.method === "GET") {
+      return healthCheck(request, container);
     }
 
     const origin = allowedOrigin(request, workerEnv);
@@ -600,10 +181,7 @@ export default {
       return new Response("Forbidden origin", { status: 403 });
     }
 
-    if ((url.pathname === "/_worker/auth/session"
-      || url.pathname === "/_worker/auth/profile"
-      || url.pathname === "/_worker/save/load"
-      || url.pathname === "/_worker/save/store") && request.method === "OPTIONS") {
+    if (API_PATHS.has(url.pathname) && request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
     if (url.pathname === "/_worker/auth/session" && request.method === "POST") {
@@ -611,6 +189,9 @@ export default {
     }
     if (url.pathname === "/_worker/auth/profile" && request.method === "POST") {
       return addCors(await updateBrowserProfile(request, workerEnv), origin);
+    }
+    if (url.pathname === "/_worker/auth/logout" && request.method === "POST") {
+      return addCors(await logoutBrowserSession(request, workerEnv), origin);
     }
     if (url.pathname === "/_worker/save/load" && request.method === "POST") {
       return addCors(await loadBrowserCloudSave(request, workerEnv), origin);

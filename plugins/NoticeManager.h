@@ -6,7 +6,7 @@
 
 #include <drogon/plugins/Plugin.h>
 #include <helpers/I18nHelper.h>
-#include <models/Notice.h>
+#include <helpers/D1Store.h>
 
 namespace techmino::plugins {
     class NoticeManager :
@@ -34,6 +34,5 @@ namespace techmino::plugins {
 
     private:
         std::string _fallbackLanguage;
-        drogon::orm::Mapper<drogon_model::techrater::Notice> _noticeMapper;
     };
 }

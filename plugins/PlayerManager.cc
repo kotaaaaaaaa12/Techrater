@@ -9,7 +9,6 @@
 #include <utils/crypto.h>
 
 using namespace drogon;
-using namespace drogon_model;
 using namespace magic_enum;
 using namespace std;
 using namespace techmino::helpers;
@@ -18,8 +17,7 @@ using namespace techmino::structures;
 using namespace techmino::types;
 using namespace techmino::utils;
 
-PlayerManager::PlayerManager() : RedisHelper(CMAKE_PROJECT_NAME),
-                                 _dataMapper(app().getDbClient()) {}
+PlayerManager::PlayerManager() : RedisHelper(CMAKE_PROJECT_NAME) {}
 
 void PlayerManager::initAndStart(const Json::Value& config) {
     if (!(
@@ -73,11 +71,9 @@ void PlayerManager::deactivate(int64_t playerId, const std::string& token) {
             k503ServiceUnavailable
         );
     }
-    _dataMapper.deleteBy(orm::Criteria(
-        techrater::Data::Cols::_id,
-        orm::CompareOperator::EQ,
-        playerId
-    ));
+    Json::Value payload;
+    payload["playerId"] = Json::Int64(playerId);
+    D1Store::call("player.delete", payload);
 }
 
 string PlayerManager::oauth(int64_t playerId, const string& token) {
@@ -88,15 +84,7 @@ string PlayerManager::oauth(int64_t playerId, const string& token) {
             k503ServiceUnavailable
         );
     }
-    if (!_dataMapper.count(orm::Criteria(
-        techrater::Data::Cols::_id,
-        orm::CompareOperator::EQ,
-        playerId
-    ))) {
-        techrater::Data data;
-        data.setId(playerId);
-        _dataMapper.insert(data);
-    }
+    // Persistent profiles are created by the Worker before the token exchange.
     return _generateAccessToken(to_string(playerId));
 }
 
@@ -140,15 +128,11 @@ Json::Value PlayerManager::getPlayerData(
     int64_t playerId
 ) {
     int64_t targetId = playerId;
-    NO_EXCEPTION(
-        targetId = getPlayerIdByAccessToken(accessToken);
-    )
-    try {
-        auto data = _dataMapper.findOne(orm::Criteria(
-            techrater::Data::Cols::_id,
-            orm::CompareOperator::EQ,
-            targetId
-        )).toJson();
+    if (targetId <= 0) targetId = getPlayerIdByAccessToken(accessToken);
+    {
+        Json::Value payload;
+        payload["playerId"] = Json::Int64(targetId);
+        auto data = D1Store::call("player.get", payload);
         if (playerId > 0) {
             data.removeMember("settings");
             data.removeMember("keymaps");
@@ -157,13 +141,6 @@ Json::Value PlayerManager::getPlayerData(
             data.removeMember("touch_3");
         }
         return data;
-    } catch (const orm::UnexpectedRows&) {
-        LOG_DEBUG << "playerNotFound: " << targetId;
-        throw ResponseException(
-            i18n("playerNotFound"),
-            ResultCode::NotFound,
-            k404NotFound
-        );
     }
 }
 
@@ -171,9 +148,10 @@ void PlayerManager::updatePlayerData(
     int64_t playerId,
     RequestJson request
 ) {
-    auto data = _dataMapper.findByPrimaryKey(playerId);
-    data.updateByJson(request.ref());
-    _dataMapper.update(data);
+    Json::Value payload;
+    payload["playerId"] = Json::Int64(playerId);
+    payload["values"] = request.ref();
+    D1Store::call("player.update", payload);
 }
 
 bool PlayerManager::ipLimit(const string& ip) {

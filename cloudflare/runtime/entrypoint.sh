@@ -1,30 +1,16 @@
 #!/bin/sh
 set -eu
 
-: "${SUPABASE_DB_HOST:?Missing SUPABASE_DB_HOST}"
-: "${SUPABASE_DB_PORT:=5432}"
-: "${SUPABASE_DB_NAME:=postgres}"
-: "${SUPABASE_DB_USER:?Missing SUPABASE_DB_USER}"
-: "${SUPABASE_DB_PASSWORD:?Missing SUPABASE_DB_PASSWORD}"
 : "${TECHRATER_AUTH_TOKEN:?Missing TECHRATER_AUTH_TOKEN}"
+: "${TECHRATER_DATA_ORIGIN:?Missing TECHRATER_DATA_ORIGIN}"
 
-echo "TECHRATER_BOOT_CONFIG port=8080 database=${SUPABASE_DB_HOST}:${SUPABASE_DB_PORT}/${SUPABASE_DB_NAME}"
+echo "TECHRATER_BOOT_CONFIG port=8080 storage=D1"
 
 jq -n \
-  --arg host "$SUPABASE_DB_HOST" \
-  --argjson port "$SUPABASE_DB_PORT" \
-  --arg dbname "$SUPABASE_DB_NAME" \
-  --arg user "$SUPABASE_DB_USER" \
-  --arg passwd "$SUPABASE_DB_PASSWORD" \
   --arg authToken "$TECHRATER_AUTH_TOKEN" \
   '{
     listeners: [{address:"0.0.0.0",port:8080,https:false}],
-    db_clients: [{
-      name:"default",rdbms:"postgresql",host:$host,port:$port,
-      dbname:$dbname,user:$user,passwd:$passwd,is_fast:false,
-      number_of_connections:2,timeout:10,
-      connect_options:{sslmode:"require"}
-    }],
+    db_clients: [],
     redis_clients: [{
       name:"default",host:"127.0.0.1",port:6379,db:0,
       is_fast:false,number_of_connections:2,timeout:5
@@ -32,7 +18,7 @@ jq -n \
     app:{
       number_of_threads:1,enable_session:false,document_root:"/app/empty",
       home_page:"index.html",client_max_websocket_message_size:"256K",
-      idle_connection_timeout:60,log:{log_level:"TRACE"}
+      idle_connection_timeout:60,log:{log_level:"INFO"}
     },
     plugins:[
       {name:"techmino::plugins::Configurator",dependencies:[],config:{block:{enable:false,whiteList:[]}}},
