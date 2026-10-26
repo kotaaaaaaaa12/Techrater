@@ -1,9 +1,11 @@
 #include <drogon/drogon.h>
 #include <controllers/WebSocket.h>
 #include <memory>
+#include <helpers/PasswordHash.h>
 
 int main() {
     drogon::app().loadConfigFile("config.json");
+    techmino::helpers::registerPasswordHashRoute();
     drogon::app().registerController(
             std::make_shared<techmino::ws::v1::WebSocket>()
     );
