@@ -9,6 +9,9 @@ RUN apt-get update \
 
 WORKDIR /src/techrater
 COPY . .
+RUN (grep -Fq '#include <helpers/PasswordHash.h>' main.cc \
+     && grep -Fq 'techmino::helpers::registerPasswordHashRoute();' main.cc) \
+    || (echo "Password hash route is missing from main.cc. Upload main.cc with its exact filename, not main.cp." >&2; exit 1)
 RUN test -f vcpkg/scripts/buildsystems/vcpkg.cmake \
     || (git init vcpkg \
         && git -C vcpkg remote add origin https://github.com/microsoft/vcpkg.git \
